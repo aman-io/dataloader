@@ -69,29 +69,33 @@ defmodule Dataloader.KV do
     end
 
     def load(source, batch_key, id) do
-      if fetched?(source.results, batch_key, id) do
-        source
-      else
-        update_in(source.batches, fn batches ->
-          Map.update(batches, batch_key, MapSet.new([id]), &MapSet.put(&1, id))
-        end)
-      end
-    end
+      case fetch(source, batch_key, id) do
+        {:error, _message} ->
+          update_in(source.batches, fn batches ->
+            Map.update(batches, batch_key, MapSet.new([id]), &MapSet.put(&1, id))
+          end)
 
-    defp fetched?(results, batch_key, id) do
-      case results do
-        %{^batch_key => %{^id => {:error, _}}}  -> false
-        %{^batch_key => %{^id => _}}  -> true
-        _ -> false
+        {:ok, nil} ->
+          batches = Map.get(source.batches, batch_key, MapSet.new([]))
+
+          if MapSet.member?(batches, id) do
+            source
+          else
+            update_in(source.batches, fn batches ->
+              Map.update(batches, batch_key, MapSet.new([id]), &MapSet.put(&1, id))
+            end)
+          end
+
+        _ ->
+          source
       end
     end
 
     def fetch(source, batch_key, id) do
       with {:ok, batch} <- Map.fetch(source.results, batch_key) do
-        case Map.fetch(batch, id) do
-          :error -> {:error, "Unable to find id #{inspect(id)}"}
-          {:ok, {:error, reason}} -> {:error, reason}
-          {:ok, item} -> {:ok, item}
+        case Map.get(batch, id) do
+          {:error, reason} -> {:error, reason}
+          item -> {:ok, item}
         end
       else
         :error ->
@@ -101,7 +105,7 @@ defmodule Dataloader.KV do
 
     def run(source) do
       fun = fn {batch_key, ids} ->
-        {batch_key, source.load_function.(batch_key, ids)}
+         {batch_key, source.load_function.(batch_key, ids)}
       end
 
       results = Dataloader.async_safely(Dataloader, :run_tasks, [source.batches, fun])
