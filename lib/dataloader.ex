@@ -143,6 +143,11 @@ defmodule Dataloader do
   def run(dataloader) do
     if pending_batches?(dataloader) do
       fun = fn {name, source} -> {name, Source.run(source)} end
+      id = :erlang.unique_integer()
+      system_time = System.system_time()
+      start_time_mono = System.monotonic_time()
+
+      emit_start_event(id, system_time, dataloader)
 
       sources =
         async_safely(__MODULE__, :run_tasks, [
@@ -156,10 +161,30 @@ defmodule Dataloader do
         end)
         |> Map.new()
 
-      %{dataloader | sources: sources}
+      updated_dataloader = %{dataloader | sources: sources}
+
+      emit_stop_event(id, start_time_mono, updated_dataloader)
+
+      updated_dataloader
     else
       dataloader
     end
+  end
+
+  defp emit_start_event(id, system_time, dataloader) do
+    :telemetry.execute(
+      [:dataloader, :source, :run, :start],
+      %{system_time: system_time},
+      %{id: id, dataloader: dataloader}
+    )
+  end
+
+  defp emit_stop_event(id, start_time_mono, dataloader) do
+    :telemetry.execute(
+      [:dataloader, :source, :run, :stop],
+      %{duration: System.monotonic_time() - start_time_mono},
+      %{id: id, dataloader: dataloader}
+    )
   end
 
   defp dataloader_timeout(dataloader) do
@@ -214,7 +239,14 @@ defmodule Dataloader do
   end
 
   defp get_source(loader, source_name) do
-    loader.sources[source_name] || raise "Source does not exist: #{inspect(source_name)}"
+    loader.sources[source_name] ||
+      raise """
+      Source does not exist: #{inspect(source_name)}
+
+      Registered sources are:
+
+      #{inspect(Enum.map(loader.sources, fn {source, _} -> source end))}
+      """
   end
 
   @doc """
@@ -276,10 +308,11 @@ defmodule Dataloader do
   """
   @spec run_tasks(list(), fun(), keyword()) :: map()
   def run_tasks(items, fun, opts \\ []) do
-    task_opts = [
-      timeout: opts[:timeout] || @default_timeout,
-      on_timeout: :kill_task
-    ]
+    task_opts =
+      opts
+      |> Keyword.take([:timeout, :max_concurrency])
+      |> Keyword.put_new(:timeout, @default_timeout)
+      |> Keyword.put(:on_timeout, :kill_task)
 
     results =
       items
@@ -294,8 +327,6 @@ defmodule Dataloader do
   end
 
   @doc """
-  This function is depreacted in favour of `async_safely/3`
-
   This used to be used by both the `Dataloader` module for running multiple
   source queries concurrently, and the `KV` and `Ecto` sources to actually run
   separate batch fetches (e.g. for `Posts` and `Users` at the same time).
@@ -306,6 +337,7 @@ defmodule Dataloader do
 
   Please use `async_safely/3` instead of this for fetching data from sources
   """
+  @doc deprecated: "Use async_safely/3 instead"
   @spec pmap(list(), fun(), keyword()) :: map()
   def pmap(items, fun, opts \\ []) do
     async_safely(__MODULE__, :run_tasks, [items, fun, opts])

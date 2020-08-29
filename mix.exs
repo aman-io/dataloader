@@ -1,7 +1,7 @@
 defmodule Dataloader.Mixfile do
   use Mix.Project
 
-  @version "1.0.7"
+  @version "1.0.8"
 
   def project do
     [
@@ -17,7 +17,8 @@ defmodule Dataloader.Mixfile do
         main: "Dataloader",
         source_ref: "v#{@version}",
         extras: [
-          "CHANGELOG.md"
+          "CHANGELOG.md",
+          "guides/telemetry.md"
         ]
       ],
       deps: deps()
@@ -61,7 +62,8 @@ defmodule Dataloader.Mixfile do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:ecto, ">= 0.0.0", optional: true},
+      {:ecto, ">= 3.4.3 and < 4.0.0", optional: true},
+      {:telemetry, "~> 0.4"},
       {:ecto_sql, "~> 3.0", optional: true, only: :test},
       {:postgrex, "~> 0.14", only: :test},
       {:dialyxir, "~> 0.5", only: :dev},

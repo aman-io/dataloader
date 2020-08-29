@@ -31,12 +31,34 @@ defmodule Dataloader.EctoTest do
     |> order_by(asc: :id)
   end
 
+  defp query(User, args, test_pid) do
+    send(test_pid, :querying)
+
+    User
+    |> where(^Enum.to_list(args))
+  end
+
   defp query(queryable, _args, test_pid) do
     send(test_pid, :querying)
     queryable
   end
 
-  test "basic loading works", %{loader: loader} do
+  test "basic loading works along with telemetry metrics", %{loader: loader, test: test} do
+    self = self()
+
+    :ok =
+      :telemetry.attach_many(
+        "#{test}",
+        [
+          [:dataloader, :source, :batch, :run, :start],
+          [:dataloader, :source, :batch, :run, :stop]
+        ],
+        fn name, measurements, metadata, _ ->
+          send(self, {:telemetry_event, name, measurements, metadata})
+        end,
+        nil
+      )
+
     users = [
       %{username: "Ben Wilson"}
     ]
@@ -59,6 +81,12 @@ defmodule Dataloader.EctoTest do
 
     assert length(loaded_users) == 1
     assert users == loaded_users
+
+    assert_receive {:telemetry_event, [:dataloader, :source, :batch, :run, :start],
+                    %{system_time: _}, %{id: _, batch: _}}
+
+    assert_receive {:telemetry_event, [:dataloader, :source, :batch, :run, :stop], %{duration: _},
+                    %{id: _, batch: _}}
 
     # loading again doesn't query again due to caching
     loader
@@ -268,58 +296,86 @@ defmodule Dataloader.EctoTest do
         Dataloader.load(loader, Test, {User, %{foo: :bar}}, username: 1)
       end)
 
-    assert message =~ "cardinality"
+    assert message =~ "Cardinality"
   end
 
-  test "works with has many through", %{loader: loader} do
-    user1 = %User{username: "Ben Wilson"} |> Repo.insert!()
-    user2 = %User{username: "Bruce Williams"} |> Repo.insert!()
+  describe "has_many through:" do
+    test "basic loading works", %{loader: loader} do
+      user1 = %User{username: "Ben Wilson"} |> Repo.insert!()
+      user2 = %User{username: "Bruce Williams"} |> Repo.insert!()
 
-    post1 = %Post{user_id: user1.id} |> Repo.insert!()
+      post1 = %Post{user_id: user1.id} |> Repo.insert!()
 
-    [
-      %Like{user_id: user1.id, post_id: post1.id},
-      %Like{user_id: user2.id, post_id: post1.id}
-    ]
-    |> Enum.map(&Repo.insert/1)
+      [
+        %Like{user_id: user1.id, post_id: post1.id},
+        %Like{user_id: user2.id, post_id: post1.id}
+      ]
+      |> Enum.map(&Repo.insert/1)
 
-    loader =
-      loader
-      |> Dataloader.load(Test, :liking_users, post1)
-      |> Dataloader.run()
+      loader =
+        loader
+        |> Dataloader.load(Test, :liking_users, post1)
+        |> Dataloader.run()
 
-    loaded_posts =
-      loader
-      |> Dataloader.get(Test, :liking_users, post1)
+      loaded_posts =
+        loader
+        |> Dataloader.get(Test, :liking_users, post1)
 
-    assert length(loaded_posts) == 2
-  end
+      assert length(loaded_posts) == 2
+    end
 
-  test "works with nested has many through", %{loader: loader} do
-    leaderboard = %Leaderboard{name: "Bestliked"} |> Repo.insert!()
-    user = %User{username: "Ben Wilson", leaderboard_id: leaderboard.id} |> Repo.insert!()
+    test "works with query filtering", %{loader: loader} do
+      user1 = %User{username: "Ben Wilson"} |> Repo.insert!()
+      user2 = %User{username: "Bruce Williams"} |> Repo.insert!()
 
-    post = %Post{user_id: user.id} |> Repo.insert!()
-    _score = %Score{post_id: post.id, leaderboard_id: leaderboard.id} |> Repo.insert!()
-    _like1 = %Like{post_id: post.id, user_id: user.id} |> Repo.insert!()
-    _like2 = %Like{post_id: post.id, user_id: user.id} |> Repo.insert!()
+      post1 = %Post{user_id: user1.id} |> Repo.insert!()
 
-    loader =
-      loader
-      |> Dataloader.load(Test, :awarded_posts, user)
-      |> Dataloader.load(Test, :likes, user)
-      |> Dataloader.run()
+      [
+        %Like{user_id: user1.id, post_id: post1.id},
+        %Like{user_id: user2.id, post_id: post1.id}
+      ]
+      |> Enum.map(&Repo.insert/1)
 
-    loaded_posts =
-      loader
-      |> Dataloader.get(Test, :awarded_posts, user)
+      key = {:liking_users, %{username: "Ben Wilson"}}
 
-    loaded_likes =
-      loader
-      |> Dataloader.get(Test, :likes, user)
+      loader =
+        loader
+        |> Dataloader.load(Test, key, post1)
+        |> Dataloader.run()
 
-    assert length(loaded_posts) == 1
-    assert length(loaded_likes) == 2
+      loaded_posts =
+        loader
+        |> Dataloader.get(Test, key, post1)
+
+      assert length(loaded_posts) == 1
+    end
+
+    test "works when nested", %{loader: loader} do
+      leaderboard = %Leaderboard{name: "Bestliked"} |> Repo.insert!()
+      user = %User{username: "Ben Wilson", leaderboard_id: leaderboard.id} |> Repo.insert!()
+
+      post = %Post{user_id: user.id} |> Repo.insert!()
+      _score = %Score{post_id: post.id, leaderboard_id: leaderboard.id} |> Repo.insert!()
+      _like1 = %Like{post_id: post.id, user_id: user.id} |> Repo.insert!()
+      _like2 = %Like{post_id: post.id, user_id: user.id} |> Repo.insert!()
+
+      loader =
+        loader
+        |> Dataloader.load(Test, :awarded_posts, user)
+        |> Dataloader.load(Test, :likes, user)
+        |> Dataloader.run()
+
+      loaded_posts =
+        loader
+        |> Dataloader.get(Test, :awarded_posts, user)
+
+      loaded_likes =
+        loader
+        |> Dataloader.get(Test, :likes, user)
+
+      assert length(loaded_posts) == 1
+      assert length(loaded_likes) == 2
+    end
   end
 
   test "preloads aren't used", %{loader: loader} do

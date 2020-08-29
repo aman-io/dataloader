@@ -1,5 +1,5 @@
 defmodule DataloaderTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
   import ExUnit.CaptureLog
 
   doctest Dataloader
@@ -53,6 +53,23 @@ defmodule DataloaderTest do
     end
   end
 
+  describe "unknown sources" do
+    test "load/3 for unknown source returns error", %{loader: loader} do
+      assert_raise RuntimeError, ~r/Source does not exist/, fn ->
+        loader |> Dataloader.load(:bogus, :users, "ben")
+      end
+    end
+
+    test "get/3 for unknown source returns error", %{loader: loader} do
+      assert_raise RuntimeError, ~r/Source does not exist/, fn ->
+        loader
+        |> Dataloader.load(:test, :users, "ben")
+        |> Dataloader.run()
+        |> Dataloader.get(:bogus, :users, "ben")
+      end
+    end
+  end
+
   describe "get methods when configured to raise an error" do
     test "get/4 returns a value when successful", %{loader: loader} do
       result =
@@ -64,12 +81,36 @@ defmodule DataloaderTest do
       assert result == [id: "ben", username: "Ben Wilson"]
     end
 
-    test "get_many/4 returns a value when successful", %{loader: loader} do
+    test "get_many/4 returns a value when successful and should emit telemetry events", %{
+      loader: loader,
+      test: test
+    } do
+      self = self()
+
+      :ok =
+        :telemetry.attach_many(
+          "#{test}",
+          [
+            [:dataloader, :source, :run, :start],
+            [:dataloader, :source, :run, :stop]
+          ],
+          fn name, measurements, metadata, _ ->
+            send(self, {:telemetry_event, name, measurements, metadata})
+          end,
+          nil
+        )
+
       result =
         loader
         |> Dataloader.load_many(:test, :users, ["ben", "bruce"])
         |> Dataloader.run()
         |> Dataloader.get_many(:test, :users, ["ben", "bruce"])
+
+      assert_receive {:telemetry_event, [:dataloader, :source, :run, :start], %{system_time: _},
+                      %{id: _, dataloader: _}}
+
+      assert_receive {:telemetry_event, [:dataloader, :source, :run, :stop], %{duration: _},
+                      %{id: _, dataloader: _}}
 
       assert result == [
                [id: "ben", username: "Ben Wilson"],
